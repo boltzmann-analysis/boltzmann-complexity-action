@@ -1,0 +1,248 @@
+name: 'Boltzmann Complexity Report'
+description: 'Analyze code complexity changes between commits and post a PR comment'
+author: 'Boltzmann Analysis'
+
+branding:
+  icon: 'bar-chart-2'
+  color: 'blue'
+
+inputs:
+  github-token:
+    description: 'GitHub token for posting PR comments'
+    required: true
+  repo-url:
+    description: 'Repository URL (defaults to current repo in git@github.com:owner/repo.git format)'
+    required: false
+  base-commit:
+    description: 'Base commit SHA (defaults to PR base)'
+    required: false
+  head-commit:
+    description: 'Head commit SHA (defaults to PR head)'
+    required: false
+  api-url:
+    description: 'Boltzmann API URL'
+    required: false
+    default: 'https://api.boltzmann.co.uk/compare'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Call Boltzmann Compare API
+      id: compare
+      shell: bash
+      run: |
+        REPO_URL="${{ inputs.repo-url }}"
+        if [ -z "$REPO_URL" ]; then
+          REPO_URL="git@github.com:${{ github.repository }}.git"
+        fi
+
+        BASE_COMMIT="${{ inputs.base-commit }}"
+        if [ -z "$BASE_COMMIT" ]; then
+          BASE_COMMIT="${{ github.event.pull_request.base.sha }}"
+        fi
+
+        HEAD_COMMIT="${{ inputs.head-commit }}"
+        if [ -z "$HEAD_COMMIT" ]; then
+          HEAD_COMMIT="${{ github.event.pull_request.head.sha }}"
+        fi
+
+        cat <<EOF > /tmp/request.json
+        {
+          "repo_url": "$REPO_URL",
+          "base_commit": "$BASE_COMMIT",
+          "head_commit": "$HEAD_COMMIT"
+        }
+        EOF
+
+        HTTP_CODE=$(curl -s -w "%{http_code}" -X POST \
+          -H "Content-Type: application/json" \
+          -d @/tmp/request.json \
+          -o /tmp/response.json \
+          ${{ inputs.api-url }})
+
+        echo "HTTP Status: $HTTP_CODE"
+
+        if [ "$HTTP_CODE" -ne 200 ]; then
+          echo "API call failed with status code: $HTTP_CODE"
+          cat /tmp/response.json
+          exit 1
+        fi
+
+        echo "API call successful"
+
+    - name: Format complexity report
+      id: format
+      shell: bash
+      run: |
+        RESPONSE=$(cat /tmp/response.json)
+
+        REPO=$(echo "$RESPONSE" | jq -r '.data.repo')
+        BASE_COMMIT=$(echo "$RESPONSE" | jq -r '.data.base_commit' | cut -c1-7)
+        HEAD_COMMIT=$(echo "$RESPONSE" | jq -r '.data.head_commit' | cut -c1-7)
+
+        BASE_COMPLEXITY=$(echo "$RESPONSE" | jq -r '.data.complexity_comparison.base_complexity')
+        HEAD_COMPLEXITY=$(echo "$RESPONSE" | jq -r '.data.complexity_comparison.head_complexity')
+        BASE_DENSITY=$(echo "$RESPONSE" | jq -r '.data.complexity_comparison.base_complexity_density')
+        HEAD_DENSITY=$(echo "$RESPONSE" | jq -r '.data.complexity_comparison.head_complexity_density')
+
+        if [ "$BASE_COMPLEXITY" != "null" ] && [ "$HEAD_COMPLEXITY" != "null" ]; then
+          COMPLEXITY_DELTA=$(echo "$HEAD_COMPLEXITY - $BASE_COMPLEXITY" | bc -l)
+          COMPLEXITY_BASE_FMT=$(printf "%.2f" $BASE_COMPLEXITY)
+          COMPLEXITY_HEAD_FMT=$(printf "%.2f" $HEAD_COMPLEXITY)
+
+          if (( $(echo "$COMPLEXITY_DELTA > 0" | bc -l) )); then
+            COMPLEXITY_DELTA_FMT="📈 +$(printf "%.2f" $COMPLEXITY_DELTA)"
+          elif (( $(echo "$COMPLEXITY_DELTA < 0" | bc -l) )); then
+            COMPLEXITY_DELTA_FMT="✅ $(printf "%.2f" $COMPLEXITY_DELTA)"
+          else
+            COMPLEXITY_DELTA_FMT="➖ 0.00"
+          fi
+        else
+          COMPLEXITY_BASE_FMT="N/A"
+          COMPLEXITY_HEAD_FMT="N/A"
+          COMPLEXITY_DELTA_FMT="N/A"
+        fi
+
+        if [ "$BASE_DENSITY" != "null" ] && [ "$HEAD_DENSITY" != "null" ]; then
+          DENSITY_DELTA=$(echo "$HEAD_DENSITY - $BASE_DENSITY" | bc -l)
+          DENSITY_BASE_FMT=$(printf "%.4f" $BASE_DENSITY)
+          DENSITY_HEAD_FMT=$(printf "%.4f" $HEAD_DENSITY)
+
+          if (( $(echo "$DENSITY_DELTA > 0" | bc -l) )); then
+            DENSITY_DELTA_FMT="📈 +$(printf "%.4f" $DENSITY_DELTA)"
+          elif (( $(echo "$DENSITY_DELTA < 0" | bc -l) )); then
+            DENSITY_DELTA_FMT="✅ $(printf "%.4f" $DENSITY_DELTA)"
+          else
+            DENSITY_DELTA_FMT="➖ 0.0000"
+          fi
+        else
+          DENSITY_BASE_FMT="N/A"
+          DENSITY_HEAD_FMT="N/A"
+          DENSITY_DELTA_FMT="N/A"
+        fi
+
+        FILES_ADDED=$(echo "$RESPONSE" | jq -r '.data.summary.files_added')
+        FILES_DELETED=$(echo "$RESPONSE" | jq -r '.data.summary.files_deleted')
+        FILES_MODIFIED=$(echo "$RESPONSE" | jq -r '.data.summary.files_modified')
+        FILES_UNCHANGED=$(echo "$RESPONSE" | jq -r '.data.summary.files_unchanged')
+
+        cat <<EOF > /tmp/report.md
+        ## 📊 Boltzmann Complexity Analysis
+
+        **Repository:** \`$REPO\`
+        **Comparison:** \`$BASE_COMMIT\` → \`$HEAD_COMMIT\`
+
+        ### Overall Complexity
+
+        | Metric | Base | Head | Change |
+        |--------|------|------|--------|
+        | **Complexity** | $COMPLEXITY_BASE_FMT | $COMPLEXITY_HEAD_FMT | $COMPLEXITY_DELTA_FMT |
+        | **Density** | $DENSITY_BASE_FMT | $DENSITY_HEAD_FMT | $DENSITY_DELTA_FMT |
+
+        ### File Summary
+
+        - 📄 **Files Added:** $FILES_ADDED
+        - 🗑️ **Files Deleted:** $FILES_DELETED
+        - ✏️ **Files Modified:** $FILES_MODIFIED
+        - ✔️ **Files Unchanged:** $FILES_UNCHANGED
+
+        EOF
+
+        NODE_DIFF_COUNT=$(echo "$RESPONSE" | jq '.data.node_diffs_by_density | length')
+
+        if [ "$NODE_DIFF_COUNT" -gt 0 ]; then
+          echo "### 🔥 Complexity Hotspots (by Density)" >> /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo "Top code sections ranked by complexity per line of code:" >> /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo "| File | Lines | Status | Density Δ |" >> /tmp/report.md
+          echo "|------|-------|--------|-----------|" >> /tmp/report.md
+
+          echo "$RESPONSE" | jq -r '.data.node_diffs_by_density[:10][] |
+            (if .complexity_density_delta > 0 then "📈 +" else (if .complexity_density_delta < 0 then "✅ " else "➖ " end) end) as $prefix |
+            (.node_path | split(":")[0]) as $file |
+            (if .start_line != null and .end_line != null then "L\(.start_line)-\(.end_line)" else "—" end) as $lines |
+            "| `\($file)` | \($lines) | \(.status) | \($prefix)\(.complexity_density_delta | tostring | tonumber | . * 10000 | round / 10000) |"
+          ' >> /tmp/report.md
+
+          echo "" >> /tmp/report.md
+
+          echo "### 📊 Complexity Hotspots (by Absolute)" >> /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo "Top code sections ranked by total complexity change:" >> /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo "| File | Lines | Status | Complexity Δ |" >> /tmp/report.md
+          echo "|------|-------|--------|--------------|" >> /tmp/report.md
+
+          echo "$RESPONSE" | jq -r '.data.node_diffs_by_absolute[:10][] |
+            (if .complexity_delta > 0 then "📈 +" else (if .complexity_delta < 0 then "✅ " else "➖ " end) end) as $prefix |
+            (.node_path | split(":")[0]) as $file |
+            (if .start_line != null and .end_line != null then "L\(.start_line)-\(.end_line)" else "—" end) as $lines |
+            "| `\($file)` | \($lines) | \(.status) | \($prefix)\(.complexity_delta | tostring | tonumber | . * 100 | round / 100) |"
+          ' >> /tmp/report.md
+
+          echo "" >> /tmp/report.md
+        fi
+
+        TOTAL_CHANGED=$((FILES_ADDED + FILES_MODIFIED))
+
+        if [ $TOTAL_CHANGED -gt 0 ]; then
+          echo "<details>" >> /tmp/report.md
+          echo "<summary>📁 File Details (click to expand)</summary>" >> /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo "| File | Status | Base | Head | Δ |" >> /tmp/report.md
+          echo "|------|--------|------|------|---|" >> /tmp/report.md
+
+          echo "$RESPONSE" | jq -r '[.data.file_comparisons[] | select(.status == "ComplexityChanged" or .status == "Added")] | sort_by(.file_path) | .[] |
+            (if .complexity_comparison.base_complexity != null then (.complexity_comparison.base_complexity | tostring | tonumber | floor | tostring) else "—" end) as $base |
+            (if .complexity_comparison.head_complexity != null then (.complexity_comparison.head_complexity | tostring | tonumber | floor | tostring) else "—" end) as $head |
+            (if .complexity_comparison.base_complexity != null and .complexity_comparison.head_complexity != null then ((.complexity_comparison.head_complexity - .complexity_comparison.base_complexity) | tostring | tonumber | floor | tostring) else "—" end) as $delta |
+            (if .status == "Added" then "🆕" else "✏️" end) as $icon |
+            "| `\(.file_path)` | \($icon) \(.status) | \($base) | \($head) | \($delta) |"
+          ' >> /tmp/report.md
+
+          echo "" >> /tmp/report.md
+          echo "</details>" >> /tmp/report.md
+        fi
+
+        cat >> /tmp/report.md <<EOF
+
+        ---
+
+        *Generated by [Boltzmann Code Complexity Analyzer](https://boltzmann.co.uk)*
+        EOF
+
+    - name: Post PR comment
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('/tmp/report.md', 'utf8');
+
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+
+          const botComment = comments.find(comment =>
+            comment.user.type === 'Bot' &&
+            comment.body.includes('Boltzmann Complexity Analysis')
+          );
+
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: report
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
+          }
