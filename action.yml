@@ -9,21 +9,8 @@ branding:
 inputs:
   github-token:
     description: 'GitHub token for posting PR comments'
-    required: true
-  repo-url:
-    description: 'Repository URL (defaults to current repo in git@github.com:owner/repo.git format)'
     required: false
-  base-commit:
-    description: 'Base commit SHA (defaults to PR base)'
-    required: false
-  head-commit:
-    description: 'Head commit SHA (defaults to PR head)'
-    required: false
-  api-url:
-    description: 'Boltzmann API URL'
-    required: false
-    default: 'https://api.boltzmann.co.uk/compare'
-
+    default: ${{ github.token }}
 runs:
   using: 'composite'
   steps:
@@ -31,26 +18,11 @@ runs:
       id: compare
       shell: bash
       run: |
-        REPO_URL="${{ inputs.repo-url }}"
-        if [ -z "$REPO_URL" ]; then
-          REPO_URL="git@github.com:${{ github.repository }}.git"
-        fi
-
-        BASE_COMMIT="${{ inputs.base-commit }}"
-        if [ -z "$BASE_COMMIT" ]; then
-          BASE_COMMIT="${{ github.event.pull_request.base.sha }}"
-        fi
-
-        HEAD_COMMIT="${{ inputs.head-commit }}"
-        if [ -z "$HEAD_COMMIT" ]; then
-          HEAD_COMMIT="${{ github.event.pull_request.head.sha }}"
-        fi
-
         cat <<EOF > /tmp/request.json
         {
-          "repo_url": "$REPO_URL",
-          "base_commit": "$BASE_COMMIT",
-          "head_commit": "$HEAD_COMMIT"
+          "repo_url": "git@github.com:${{ github.repository }}.git",
+          "base_commit": "${{ github.event.pull_request.base.sha }}",
+          "head_commit": "${{ github.event.pull_request.head.sha }}"
         }
         EOF
 
@@ -58,7 +30,7 @@ runs:
           -H "Content-Type: application/json" \
           -d @/tmp/request.json \
           -o /tmp/response.json \
-          ${{ inputs.api-url }})
+          https://api.boltzmann.co.uk/compare)
 
         echo "HTTP Status: $HTTP_CODE"
 
