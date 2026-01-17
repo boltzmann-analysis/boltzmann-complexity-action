@@ -41,37 +41,15 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `github-token` | GitHub token for posting PR comments | Yes | - |
-| `repo-url` | Repository URL in `git@github.com:owner/repo.git` format | No | Current repo |
-| `base-commit` | Base commit SHA | No | PR base commit |
-| `head-commit` | Head commit SHA | No | PR head commit |
 | `api-url` | Boltzmann API URL | No | `https://api.boltzmann.co.uk/compare` |
+
+The repository URL and commit SHAs are automatically detected from the workflow context.
 
 ## Example Output
 
 The action posts a comment like this on your PR:
 
----
-
-## 📊 Boltzmann Complexity Analysis
-
-**Repository:** `owner/repo`
-**Comparison:** `abc1234` → `def5678`
-
-### Overall Complexity
-
-| Metric | Base | Head | Change |
-|--------|------|------|--------|
-| **Complexity** | 1234.56 | 1345.67 | 📈 +111.11 |
-| **Density** | 0.4521 | 0.4612 | 📈 +0.0091 |
-
-### File Summary
-
-- 📄 **Files Added:** 2
-- 🗑️ **Files Deleted:** 0
-- ✏️ **Files Modified:** 5
-- ✔️ **Files Unchanged:** 42
-
----
+![Example complexity report](example.png)
 
 ## License
 
